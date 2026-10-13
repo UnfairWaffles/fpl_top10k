@@ -148,7 +148,6 @@ def build_model(boot, fixtures, next_gw, fix_w=0.45, mode="Balanced"):
     return p_df, gws
 
 def solve_xi(sq_df, gw_col):
-    """Pure fast formation optimizer (1 GKP, 3-5 DEF, 2-5 MID, 1-3 FWD) with zero external solver dependencies."""
     df = sq_df.copy().reset_index(drop=True)
     df["start"] = 0
     df["cap"] = 0
@@ -181,7 +180,6 @@ def eval_squad_5gw(sq_df, gws, gamma=0.90):
     return round(sum((gamma ** i) * solve_xi(sq_df, f"xp_{g}")[1] for i, g in enumerate(gws)), 2)
 
 def solve_transfers(all_df, curr_ids, bank, max_t, gws, gamma=0.90):
-    """Fast multi-transfer search respecting position, club<=3, and budget constraints."""
     curr_sq = all_df[all_df["id"].isin(curr_ids)].copy().reset_index(drop=True)
     base_xp = eval_squad_5gw(curr_sq, gws, gamma)
     if max_t <= 0:
@@ -277,4 +275,42 @@ st.subheader(f"📋 {title}")
 t1, t2, t3 = st.tabs([f"🚀 GW{next_gw} Roll & Chip Planner", "🪓 Chopping Block", "🔍 Target Hunter"])
 
 with t1:
-    _, _, _, xp_hold = solve_transfers(p_df, sq_ids, bank
+    xp_hold = eval_squad_5gw(curr_sq, gws)
+    sq_1, s_1, b_1, xp_1 = solve_transfers(p_df, sq_ids, bank, 1, gws)
+    sq_m, s_m, b_m, xp_m = solve_transfers(p_df, sq_ids, bank, max(2, fts), gws)
+    g1 = round(xp_1 - xp_hold, 2)
+    gm = round(xp_m - xp_hold, 2)
+    next_ft = min(5, fts + 1)
+
+    if fts == 5:
+        st.warning(f"🔥 **USE TRANSFER (At 5 FT Cap!)** Best 1-FT move gains **+{g1} xP** over 5 GWs.")
+    elif g1 < 2.6:
+        st.info(f"🏦 **VERDICT: ROLL TRANSFER ({fts} FT → {next_ft} FTs)** | 1 move only gains +{g1} xP, while a {max(2, fts)}-transfer swing gains **+{gm} xP**.")
+    else:
+        st.success(f"✅ **VERDICT: USE TRANSFER NOW (+{g1} xP Gain)**")
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric(f"Roll (Bank {next_ft} FT)", f"{xp_hold} xP", "0 Transfers")
+    o1 = ", ".join(s_1["web_name"]) if not s_1.empty else "Hold"
+    i1 = ", ".join(b_1["web_name"]) if not b_1.empty else "Hold"
+    c2.metric(f"1 FT: {o1} → {i1}", f"{xp_1} xP", f"+{g1} xP")
+    om = ", ".join(s_m["web_name"]) if not s_m.empty else "Hold"
+    im = ", ".join(b_m["web_name"]) if not b_m.empty else "Hold"
+    c3.metric(f"{max(2, fts)}-FT Swing: {om} → {im}", f"{xp_m} xP", f"+{gm} xP")
+
+    view = st.radio("View Lineup For:", ["Current Squad (Roll)", "Best 1-FT Squad", f"Best {max(2, fts)}-FT Squad"], horizontal=True)
+    act_sq = sq_1 if "1-FT" in view else (sq_m if "-FT" in view else curr_sq)
+    ldf, sxp, bxp = solve_xi(act_sq, f"xp_{next_gw}")
+    st.markdown(f"#### 🏆 Optimal GW{next_gw} Starting XI (**{sxp} xP** | Bench Boost Value: **+{bxp} xP**)")
+    cols_show = ["web_name", "pos", "club", "price", "start", "cap", f"op_{next_gw}", f"xp_{next_gw}", "xp_5gw", "role"]
+    st.dataframe(ldf.sort_values(["start", "element_type"], ascending=[False, True])[cols_show], use_container_width=True, hide_index=True)
+
+with t2:
+    st.markdown("#### 🪓 Squad Audit (Sorted Worst to Best over Next 5 GWs)")
+    acols = ["web_name", "pos", "club", "price", "score", "verdict", "expected_goal_involvements_per_90", "defcon_90", "xp_5gw", "fix_5gw"]
+    st.dataframe(curr_sq.sort_values("score", ascending=True)[acols], use_container_width=True, hide_index=True)
+
+with t3:
+    st.markdown("#### 🔍 Top Underlying & Fixture Targets (Next 5 GWs)")
+    hcols = ["web_name", "pos", "club", "price", "selected_by_percent", "role", "score", "xp_5gw", "expected_goal_involvements_per_90", "defcon_90", "fix_5gw"]
+    st.dataframe(p_df[p_df["minutes"] >= 180].sort_values("xp_5gw", ascending=False).head(50)[hcols], use_container_width=True, hide_index=True)
