@@ -64,18 +64,12 @@ def build_model(boot, fixtures, next_gw, fix_w=0.45, mode="Balanced"):
 
     games = max(1, next_gw - 1)
     m_ratio = np.clip(p_df["minutes"] / (games * 90.0), 0.0, 1.0)
-    if "chance_of_playing_next_round" in p_df.columns:
-        chance = pd.to_numeric(p_df["chance_of_playing_next_round"], errors="coerce").fillna(100.0) / 100.0
-    else:
-        chance = 1.0
+    chance = pd.to_numeric(p_df.get("chance_of_playing_next_round", 100), errors="coerce").fillna(100.0) / 100.0 if "chance_of_playing_next_round" in p_df.columns else 1.0
     stat_m = p_df["status"].map({"a": 1.0, "d": 0.75}).fillna(0.0)
     p_df["mins_sec"] = np.clip((0.65 * m_ratio + 0.35 * np.minimum(1.0, p_df["minutes"] / 180.0)) * chance * stat_m, 0.0, 1.0)
 
     nineties = np.maximum(1.0, p_df["minutes"] / 90.0)
-    if "defensive_contribution_per_90" in p_df.columns:
-        dc = pd.to_numeric(p_df["defensive_contribution_per_90"], errors="coerce").fillna(0.0)
-    else:
-        dc = (p_df["bps"] / nineties) * 0.38
+    dc = pd.to_numeric(p_df["defensive_contribution_per_90"], errors="coerce").fillna(0.0) if "defensive_contribution_per_90" in p_df.columns else (p_df["bps"] / nineties) * 0.38
     p_df["defcon_90"] = dc.round(2)
     p_df["defcon_pts"] = np.where(
         p_df["pos"] == "DEF", np.clip(dc / 13.5, 0.0, 0.75) * 2.0,
@@ -186,10 +180,10 @@ def solve_transfers(all_df, curr_ids, bank, max_t, gws, gamma=0.90):
         return curr_sq, pd.DataFrame(), pd.DataFrame(), base_xp
 
     weights = np.array([gamma ** i for i in range(len(gws))])
-    all_df = all_df.copy()
+    all_df = all_df.copy().reset_index(drop=True)
     all_df["disc"] = sum(w * all_df[f"xp_{g}"].values for w, g in zip(weights, gws))
 
-    working_sq = curr_sq.copy()
+    working_sq = curr_sq.copy().reset_index(drop=True)
     rem_bank = float(bank)
     sold_list, bought_list = [], []
 
