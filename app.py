@@ -174,29 +174,35 @@ def eval_squad_5gw(sq_df, gws, gamma=0.90):
     return round(sum((gamma ** i) * solve_xi(sq_df, f"xp_{g}")[1] for i, g in enumerate(gws)), 2)
 
 def solve_transfers(all_df, curr_ids, bank, max_t, gws, gamma=0.90):
+    # Compute 'disc' on all_df FIRST so both candidate pool and current squad have the column
+    weights = np.array([gamma ** i for i in range(len(gws))])
+    all_df = all_df.copy().reset_index(drop=True)
+    all_df["disc"] = sum(w * all_df[f"xp_{g}"].values for w, g in zip(weights, gws))
+
     curr_sq = all_df[all_df["id"].isin(curr_ids)].copy().reset_index(drop=True)
     base_xp = eval_squad_5gw(curr_sq, gws, gamma)
     if max_t <= 0:
         return curr_sq, pd.DataFrame(), pd.DataFrame(), base_xp
 
-    weights = np.array([gamma ** i for i in range(len(gws))])
-    all_df = all_df.copy().reset_index(drop=True)
-    all_df["disc"] = sum(w * all_df[f"xp_{g}"].values for w, g in zip(weights, gws))
-
     working_sq = curr_sq.copy().reset_index(drop=True)
     rem_bank = float(bank)
     sold_list, bought_list = [], []
+    orig_ids = set(curr_ids)
 
     for _ in range(int(max_t)):
         best_gain = 0.0
         best_out_id, best_in_row = None, None
-        current_id_set = set(working_sq["id"])
+        current_id_set = set(working_sq["id"].values)
         club_counts = working_sq["team"].value_counts().to_dict()
 
         for _, out_row in working_sq.iterrows():
+            out_id = int(out_row["id"])
+            if out_id not in orig_ids:
+                continue
             pos = out_row["pos"]
             max_afford = float(out_row["price"]) + rem_bank + 0.001
             out_team = int(out_row["team"])
+            out_disc = float(out_row["disc"])
 
             cands = all_df[
                 (all_df["pos"] == pos)
@@ -208,10 +214,10 @@ def solve_transfers(all_df, curr_ids, bank, max_t, gws, gamma=0.90):
                 in_team = int(in_row["team"])
                 if in_team != out_team and club_counts.get(in_team, 0) >= 3:
                     continue
-                gain = float(in_row["disc"]) - float(out_row["disc"])
+                gain = float(in_row["disc"]) - out_disc
                 if gain > best_gain:
                     best_gain = gain
-                    best_out_id = int(out_row["id"])
+                    best_out_id = out_id
                     best_in_row = in_row
 
         if best_out_id is not None and best_in_row is not None:
@@ -231,80 +237,4 @@ def solve_transfers(all_df, curr_ids, bank, max_t, gws, gamma=0.90):
     tot_xp = eval_squad_5gw(working_sq, gws, gamma)
     return working_sq, sold_df, bought_df, tot_xp
 
-st.title("⚽ Project Top 10k: FPL Command Centre")
-boot, fixtures = get_fpl_data()
-events = boot["events"]
-next_ev = next((e for e in events if e.get("is_next")), events[-1])
-next_gw = int(next_ev["id"])
-
-with st.sidebar:
-    st.header("Team & Model Settings")
-    mid_in = st.text_input("FPL Manager ID", value="", placeholder="e.g. 1234567")
-    mode = st.selectbox("Strategy Mode", ["Balanced", "Sword (<10% Diffs)", "Shield (High EO)"])
-    fix_w = st.slider("Fixture Weighting", 0.10, 0.85, 0.45, 0.05)
-
-p_df, gws = build_model(boot, fixtures, next_gw, fix_w, mode)
-
-auto_ft, auto_bank, sq_ids = 1, 0.5, []
-title = "Sample Squad (Tap '>' top-left to enter your Manager ID)"
-if mid_in.strip().isdigit():
-    md = get_manager(int(mid_in.strip()), next_gw - 1)
-    if md and "picks" in md["picks"]:
-        sq_ids = [p["element"] for p in md["picks"]["picks"]]
-        auto_ft = calc_fts(md["hist"])
-        auto_bank = md["picks"].get("entry_history", {}).get("bank", 0) / 10.0
-        title = f"{md['info'].get('name', 'My Team')} (Banked FTs: {auto_ft})"
-
-if not sq_ids:
-    for pos, cnt in [("GKP", 2), ("DEF", 5), ("MID", 5), ("FWD", 3)]:
-        sq_ids.extend(p_df[p_df["pos"] == pos].sort_values("selected_by_percent", ascending=False).head(cnt)["id"].tolist())
-
-with st.sidebar:
-    fts = st.slider("Free Transfers Available (1-5)", 1, 5, int(auto_ft))
-    bank = st.number_input("Bank (£m)", 0.0, 25.0, float(auto_bank), 0.1)
-
-curr_sq = p_df[p_df["id"].isin(sq_ids)].copy()
-st.subheader(f"📋 {title}")
-
-t1, t2, t3 = st.tabs([f"🚀 GW{next_gw} Roll & Chip Planner", "🪓 Chopping Block", "🔍 Target Hunter"])
-
-with t1:
-    xp_hold = eval_squad_5gw(curr_sq, gws)
-    sq_1, s_1, b_1, xp_1 = solve_transfers(p_df, sq_ids, bank, 1, gws)
-    sq_m, s_m, b_m, xp_m = solve_transfers(p_df, sq_ids, bank, max(2, fts), gws)
-    g1 = round(xp_1 - xp_hold, 2)
-    gm = round(xp_m - xp_hold, 2)
-    next_ft = min(5, fts + 1)
-
-    if fts == 5:
-        st.warning(f"🔥 **USE TRANSFER (At 5 FT Cap!)** Best 1-FT move gains **+{g1} xP** over 5 GWs.")
-    elif g1 < 2.6:
-        st.info(f"🏦 **VERDICT: ROLL TRANSFER ({fts} FT → {next_ft} FTs)** | 1 move only gains +{g1} xP, while a {max(2, fts)}-transfer swing gains **+{gm} xP**.")
-    else:
-        st.success(f"✅ **VERDICT: USE TRANSFER NOW (+{g1} xP Gain)**")
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric(f"Roll (Bank {next_ft} FT)", f"{xp_hold} xP", "0 Transfers")
-    o1 = ", ".join(s_1["web_name"]) if not s_1.empty else "Hold"
-    i1 = ", ".join(b_1["web_name"]) if not b_1.empty else "Hold"
-    c2.metric(f"1 FT: {o1} → {i1}", f"{xp_1} xP", f"+{g1} xP")
-    om = ", ".join(s_m["web_name"]) if not s_m.empty else "Hold"
-    im = ", ".join(b_m["web_name"]) if not b_m.empty else "Hold"
-    c3.metric(f"{max(2, fts)}-FT Swing: {om} → {im}", f"{xp_m} xP", f"+{gm} xP")
-
-    view = st.radio("View Lineup For:", ["Current Squad (Roll)", "Best 1-FT Squad", f"Best {max(2, fts)}-FT Squad"], horizontal=True)
-    act_sq = sq_1 if "1-FT" in view else (sq_m if "-FT" in view else curr_sq)
-    ldf, sxp, bxp = solve_xi(act_sq, f"xp_{next_gw}")
-    st.markdown(f"#### 🏆 Optimal GW{next_gw} Starting XI (**{sxp} xP** | Bench Boost Value: **+{bxp} xP**)")
-    cols_show = ["web_name", "pos", "club", "price", "start", "cap", f"op_{next_gw}", f"xp_{next_gw}", "xp_5gw", "role"]
-    st.dataframe(ldf.sort_values(["start", "element_type"], ascending=[False, True])[cols_show], use_container_width=True, hide_index=True)
-
-with t2:
-    st.markdown("#### 🪓 Squad Audit (Sorted Worst to Best over Next 5 GWs)")
-    acols = ["web_name", "pos", "club", "price", "score", "verdict", "expected_goal_involvements_per_90", "defcon_90", "xp_5gw", "fix_5gw"]
-    st.dataframe(curr_sq.sort_values("score", ascending=True)[acols], use_container_width=True, hide_index=True)
-
-with t3:
-    st.markdown("#### 🔍 Top Underlying & Fixture Targets (Next 5 GWs)")
-    hcols = ["web_name", "pos", "club", "price", "selected_by_percent", "role", "score", "xp_5gw", "expected_goal_involvements_per_90", "defcon_90", "fix_5gw"]
-    st.dataframe(p_df[p_df["minutes"] >= 180].sort_values("xp_5gw", ascending=False).head(50)[hcols], use_container_width=True, hide_index=True)
+st.title("⚽ Project Top 10k
