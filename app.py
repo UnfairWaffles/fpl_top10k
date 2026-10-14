@@ -87,4 +87,86 @@ p_df["xp_5gw"] = p_df[[f"xp_{g}" for g in gws]].sum(axis=1).round(2)
 p_df["disc"] = sum((0.9**i)*p_df[f"xp_{g}"].values for i, g in enumerate(gws))
 p_df["fix_5gw"] = p_df[[f"op_{g}" for g in gws]].apply(lambda r: " → ".join(r.values), axis=1)
 p_df["score"] = np.clip((p_df["xp_5gw"] / max(1.0, float(p_df["xp_5gw"].quantile(0.98))))*100.0, 0, 99).round(1)
-p_df["verdict"] = np.where(p_df
+p_df["verdict"] = np.where(p_df["mins_sec"]<0.65, "🚨 SELL: Mins Risk", np.where(p_df["xp_5gw"]<16.5, "🚨 SELL: Fixture Cliff", np.where(p_df["score"]>=72, "✅ STRONG HOLD", "⚖️ HOLD")))
+
+def solve_xi(df, col):
+    d = df.copy().reset_index(drop=True)
+    d["start"], d["cap"] = 0, 0
+    idx = []
+    for pos, k in [("GKP",1), ("DEF",3), ("MID",2), ("FWD",1)]:
+        idx.extend(d[d["pos"]==pos].sort_values(col, ascending=False).head(k).index.tolist())
+    idx.extend(d[(d["pos"]!="GKP") & (~d.index.isin(idx))].sort_values(col, ascending=False).head(11-len(idx)).index.tolist())
+    d.loc[idx, "start"] = 1
+    st_idx = d[d["start"]==1].sort_values(col, ascending=False).index
+    if len(st_idx) > 0: d.loc[st_idx[0], "cap"] = 1
+    return d, round(float((d[col]*(d["start"]+d["cap"])).sum()), 2), round(float((d[col]*(1-d["start"])).sum()), 2)
+
+def eval_5gw(df): return round(sum((0.9**i)*solve_xi(df, f"xp_{g}")[1] for i, g in enumerate(gws)), 2)
+
+def solve_tr(all_d, c_ids, bnk, k):
+    w_sq = all_d[all_d["id"].isin(c_ids)].copy().reset_index(drop=True)
+    if k <= 0: return w_sq, [], [], eval_5gw(w_sq)
+    rem_b, sold, bought, orig = float(bnk), [], [], set(c_ids)
+    for _ in range(int(k)):
+        bg, bo_id, bi_r = 0.0, None, None
+        c_set, c_cnt = set(w_sq["id"].values), w_sq["team"].value_counts().to_dict()
+        for _, o_r in w_sq.iterrows():
+            oid = int(o_r["id"])
+            if oid not in orig: continue
+            cands = all_d[(all_d["pos"]==o_r["pos"]) & (~all_d["id"].isin(c_set)) & (all_d["price"]<=float(o_r["price"])+rem_b+0.001)].sort_values("disc", ascending=False).head(15)
+            for _, i_r in cands.iterrows():
+                if int(i_r["team"]) != int(o_r["team"]) and c_cnt.get(int(i_r["team"]), 0) >= 3: continue
+                gn = float(i_r["disc"]) - float(o_r["disc"])
+                if gn > bg: bg, bo_id, bi_r = gn, oid, i_r
+        if bo_id is not None and bi_r is not None:
+            o_row = w_sq[w_sq["id"]==bo_id].iloc[0]
+            sold.append(o_row["web_name"]); bought.append(bi_r["web_name"])
+            rem_b += float(o_row["price"]) - float(bi_r["price"])
+            w_sq = pd.concat([w_sq[w_sq["id"]!=bo_id], pd.DataFrame([bi_r])], ignore_index=True)
+    return w_sq, sold, bought, eval_5gw(w_sq)
+
+auto_ft, auto_b, sq_ids, title = 1, 0.5, [], "Sample Squad (Tap '>' top-left to enter your Manager ID)"
+if mid_in.strip().isdigit():
+    md = get_mgr(int(mid_in.strip()), nxt - 1)
+    if md and "picks" in md["picks"]:
+        sq_ids = [p["element"] for p in md["picks"]["picks"]]
+        auto_ft = calc_fts(md["hist"])
+        auto_b = md["picks"].get("entry_history", {}).get("bank", 0) / 10.0
+        title = f"{md['info'].get('name', 'My Team')} (Banked FTs: {auto_ft})"
+if not sq_ids:
+    for pos, cnt in [("GKP",2), ("DEF",5), ("MID",5), ("FWD",3)]:
+        sq_ids.extend(p_df[p_df["pos"]==pos].sort_values("selected_by_percent", ascending=False).head(cnt)["id"].tolist())
+
+with st.sidebar:
+    fts = st.slider("Free Transfers (1-5)", 1, 5, int(auto_ft))
+    bank = st.number_input("Bank (£m)", 0.0, 25.0, float(auto_b), 0.1)
+
+st.title("⚽ Project Top 10k: FPL Command Centre")
+st.subheader(f"📋 {title}")
+curr_sq = p_df[p_df["id"].isin(sq_ids)].copy()
+t1, t2, t3 = st.tabs([f"🚀 GW{nxt} Roll & Chip Planner", "🪓 Chopping Block", "🔍 Target Hunter"])
+
+with t1:
+    _, _, _, xp_0 = solve_tr(p_df, sq_ids, bank, 0)
+    sq_1, s1, b1, xp_1 = solve_tr(p_df, sq_ids, bank, 1)
+    sq_m, sm, bm, xp_m = solve_tr(p_df, sq_ids, bank, max(2, fts))
+    g1, gm, nft = round(xp_1 - xp_0, 2), round(xp_m - xp_0, 2), min(5, fts + 1)
+    if fts == 5: st.warning(f"🔥 **AT 5 FT CAP — USE TRANSFER!** Best 1-FT move gains **+{g1} xP**.")
+    elif g1 < 2.6: st.info(f"🏦 **VERDICT: ROLL TRANSFER ({fts} → {nft} FTs)** | 1 move gains +{g1} xP; {max(2,fts)}-FT swing gains **+{gm} xP**.")
+    else: st.success(f"✅ **VERDICT: USE TRANSFER NOW (+{g1} xP Gain)**")
+    c1, c2, c3 = st.columns(3)
+    c1.metric(f"Roll (Bank {nft} FT)", f"{xp_0} xP", "0 Transfers")
+    c2.metric(f"1 FT: {', '.join(s1) or 'Hold'} → {', '.join(b1) or 'Hold'}", f"{xp_1} xP", f"+{g1} xP")
+    c3.metric(f"{max(2,fts)}-FT: {', '.join(sm) or 'Hold'} → {', '.join(bm) or 'Hold'}", f"{xp_m} xP", f"+{gm} xP")
+    vw = st.radio("View Lineup:", ["Current (Roll)", "Best 1-FT", f"Best {max(2,fts)}-FT"], horizontal=True)
+    act = sq_1 if "1-FT" in vw else (sq_m if "-FT" in vw else curr_sq)
+    ldf, sxp, bxp = solve_xi(act, f"xp_{nxt}")
+    st.markdown(f"#### 🏆 Optimal GW{nxt} XI (**{sxp} xP** | Bench Boost: **+{bxp} xP**)")
+    st.dataframe(ldf.sort_values(["start","element_type"], ascending=[False,True])[["web_name","pos","club","price","start","cap",f"op_{nxt}",f"xp_{nxt}","xp_5gw","role"]], use_container_width=True, hide_index=True)
+
+with t2:
+    st.dataframe(curr_sq.sort_values("score")[["web_name","pos","club","price","score","verdict","expected_goal_involvements_per_90","defcon_90","xp_5gw","fix_5gw"]], use_container_width=True, hide_index=True)
+
+with t3:
+    st.dataframe(p_df[p_df["minutes"]>=180].sort_values("xp_5gw", ascending=False).head(50)[["web_name","pos","club","price","selected_by_percent","role","score","xp_5gw","expected_goal_involvements_per_90","defcon_90","fix_5gw"]], use_container_width=True, hide_index=True)
+# --- END OF APP ---
