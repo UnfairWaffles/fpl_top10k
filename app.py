@@ -1,5 +1,6 @@
 import streamlit as st, pandas as pd, numpy as np
 import engine as eg
+import extras as ex
 
 st.set_page_config(page_title="Project Top 10k Pro", page_icon="⚽", layout="wide")
 
@@ -30,9 +31,11 @@ if not sq_ids:
     for pos, cnt in [("GKP",2), ("DEF",5), ("MID",5), ("FWD",3)]:
         sq_ids.extend(p_df[p_df["pos"]==pos].sort_values("selected_by_percent", ascending=False).head(cnt)["id"].tolist())
 
-# Feature 1: Exact Selling Price Reconstructor
 p_df = eg.apply_selling_prices(p_df, sq_ids, tr_list)
 curr_sq = p_df[p_df["id"].isin(sq_ids)].copy().reset_index(drop=True)
+
+# Lock & Ban sidebar controls
+lock_ids, ban_ids = ex.render_lock_ban_sidebar(p_df, curr_sq)
 
 with st.sidebar:
     fts = st.slider("Free Transfers (1-5)", 1, 5, int(auto_ft))
@@ -43,23 +46,27 @@ with st.sidebar:
 st.title("⚽ Project Top 10k: Pro Command Centre")
 st.subheader(f"📋 {title}")
 
-t1, t2, t3, t4, t5, t6 = st.tabs([
-    f"🚀 GW{nxt} Planner & 2-FT Combos",
+t1, t2, t3, t4, t5, t6, t7 = st.tabs([
+    f"🚀 GW{nxt} Planner & Combos",
     "🪓 Squad & Selling Prices",
-    "🔥 Target & Momentum Hunter",
-    "🃏 Wildcard & Free Hit Lab",
-    "💷 Tonight's Price Radar",
-    "🕵️ Mini-League Spy"
+    "🔥 Target & Momentum",
+    "🃏 Wildcard & Free Hit",
+    "💷 Price Radar & YC",
+    "🕵️ Mini-League Spy",
+    "📡 Matchday Live"
 ])
 
-# 1. SINGLE & SIMULTANEOUS 2-PLAYER COMBO PLANNER
 with t1:
     xp_0 = eg.eval_5gw(curr_sq, gws)
-    # Best 1-FT using exact selling_price
     best_1g, s1, b1, sq_1 = 0.0, [], [], curr_sq.copy()
     c_set, c_cnt = set(sq_ids), curr_sq["team"].value_counts().to_dict()
+    
+    # Filter banned players out of solver consideration
+    valid_p_df = p_df[~p_df["id"].isin(ban_ids)].copy()
+
     for _, o_r in curr_sq.iterrows():
-        cands = p_df[(p_df["pos"]==o_r["pos"]) & (~p_df["id"].isin(c_set)) & (p_df["price"]<=float(o_r["sell_price"])+bank+0.001)].sort_values("disc", ascending=False).head(15)
+        if int(o_r["id"]) in ban_ids: continue
+        cands = valid_p_df[(valid_p_df["pos"]==o_r["pos"]) & (~valid_p_df["id"].isin(c_set)) & (valid_p_df["price"]<=float(o_r["sell_price"])+bank+0.001)].sort_values("disc", ascending=False).head(15)
         for _, i_r in cands.iterrows():
             if int(i_r["team"]) != int(o_r["team"]) and c_cnt.get(int(i_r["team"]), 0) >= 3: continue
             gn = float(i_r["disc"]) - float(o_r["disc"])
@@ -68,8 +75,7 @@ with t1:
                 sq_1 = pd.concat([curr_sq[curr_sq["id"]!=int(o_r["id"])], pd.DataFrame([i_r])], ignore_index=True)
     xp_1 = eg.eval_5gw(sq_1, gws)
 
-    # Simultaneous 2-FT Downgrade + Upgrade Combo
-    sq_2, s2, b2, xp_2 = eg.solve_2ft_combo(p_df, sq_ids, bank, gws)
+    sq_2, s2, b2, xp_2 = eg.solve_2ft_combo(valid_p_df, sq_ids, bank, gws)
     g1, g2, nft = round(xp_1 - xp_0, 2), round(xp_2 - xp_0, 2), min(5, fts + 1)
 
     if fts == 5: st.warning(f"🔥 **AT 5 FT CAP — USE TRANSFER!** Best 1-FT gains **+{g1} xP**; 2-FT Combo gains **+{g2} xP**.")
@@ -84,20 +90,21 @@ with t1:
     vw = st.radio("Inspect XI For:", ["Current Squad (Roll)", "After 1-FT Move", "After 2-FT Linked Combo"], horizontal=True)
     act = sq_1 if "1-FT" in vw else (sq_2 if "2-FT" in vw else curr_sq)
     ldf, sxp, bxp = eg.solve_xi(act, f"xp_{nxt}")
+    
+    # Render Captaincy Matrix
+    ex.render_captaincy_matrix(ldf, nxt)
+
     st.markdown(f"#### 🏆 Optimal GW{nxt} XI (**{sxp} xP** | Bench Boost Value: **+{bxp} xP**)")
     st.dataframe(ldf.sort_values(["start","element_type"], ascending=[False,True])[["web_name","pos","club","price","sell_price","start","cap",f"op_{nxt}",f"xp_{nxt}","xp_5gw","surge_tag","role"]], use_container_width=True, hide_index=True)
 
-# 2. CHOPPING BLOCK + EXACT SELLING PRICES
 with t2:
     st.markdown("#### 🪓 Squad Audit & Locked-In Value (`sell_price` vs current `price`)")
     st.dataframe(curr_sq.sort_values("score")[["web_name","pos","club","price","sell_price","locked_val","score","verdict","momentum","defcon_90","xp_5gw","fix_5gw"]], use_container_width=True, hide_index=True)
 
-# 3. TARGET & MOMENTUM HUNTER
 with t3:
     f_pos = st.multiselect("Filter Position", ["GKP","DEF","MID","FWD"], default=["DEF","MID","FWD"])
     st.dataframe(p_df[(p_df["minutes"]>=180) & (p_df["pos"].isin(f_pos))].sort_values("xp_5gw", ascending=False).head(50)[["web_name","pos","club","price","selected_by_percent","role","surge_tag","momentum","score","xp_5gw","expected_goal_involvements_per_90","defcon_90","fix_5gw"]], use_container_width=True, hide_index=True)
 
-# 4. WILDCARD & FREE HIT SIMULATOR
 with t4:
     st.markdown(f"#### 🃏 Chip Simulator (Budget: **£{tot_sell_bud}m** | First-Half Chips Expire GW19)")
     wc_df, wc_cost, wc_5gw = eg.build_wildcard(p_df, tot_sell_bud, "disc", gws)
@@ -113,9 +120,10 @@ with t4:
     c_show, _, _ = eg.solve_xi(wc_df if "Wildcard" in chip_v else fh_df, f"xp_{nxt}")
     st.dataframe(c_show.sort_values(["start","element_type"], ascending=[False,True])[["web_name","pos","club","price","start","cap",f"op_{nxt}",f"xp_{nxt}","xp_5gw","fix_5gw"]], use_container_width=True, hide_index=True)
 
-# 5. PRICE RISE & FALL RADAR
 with t5:
-    st.markdown("#### 💷 Tonight's Transfer Velocity Radar (Beat £0.1m Price Changes)")
+    st.markdown("#### 💷 Tonight's Transfer Velocity Radar & Suspension Risk")
+    ex.render_yellow_card_radar(p_df)
+    st.divider()
     p1, p2 = st.columns(2)
     with p1:
         st.markdown("##### 📈 Top Risers (Buy Early)")
@@ -124,7 +132,6 @@ with t5:
         st.markdown("##### 📉 Top Fallers (Sell Warning)")
         st.dataframe(p_df.sort_values("net_tr", ascending=True).head(15)[["web_name","pos","club","price","net_tr","price_trend","xp_5gw"]], use_container_width=True, hide_index=True)
 
-# 6. MINI-LEAGUE RIVAL SPY
 with t6:
     if not lid_in.strip().isdigit():
         st.info("👈 Enter your **Mini-League ID** in the sidebar to spy on your top 5 rivals! (Find the number in the URL when viewing your mini-league table on the FPL website).")
@@ -151,4 +158,7 @@ with t6:
             with r2:
                 st.markdown("##### ⚔️ Pure Mini-League Differentials (0% Rival Owned)")
                 st.dataframe(p_df[p_df["id"].isin(sword_ids)].head(10)[["web_name","pos","club","price",f"xp_{nxt}","xp_5gw","fix_5gw"]], use_container_width=True, hide_index=True)
+
+with t7:
+    ex.render_live_tracker(b, nxt)
 # --- END OF APP ---
